@@ -2,8 +2,8 @@
 /*
  * $RCSfile: lut.c,v $
  * $Author: chris $
- * $Date: 2007-10-07 09:59:06 $
- * $Revision: 1.2 $
+ * $Date: 2007-10-07 11:47:15 $
+ * $Revision: 1.3 $
  *
  */ 
 //@********************************* lut.c ***********************************
@@ -42,6 +42,10 @@
 
 #define F_CPU 8000000UL
 #include <util/delay.h>
+
+/*@**************************** forward decls *******************************/
+
+void pwm_setup(uint8_t ch_id, uint8_t pin, uint8_t cnt, uint8_t oc, uint8_t mut_interval, int8_t mut_delta);
 
 /*@****************************** constants *********************************/
 /* 
@@ -88,12 +92,10 @@
 
 // push-button-input is PB1 (INT0)
 // We use an edge-triggered interrupt to detect button press
-#if 0
 #define PBI_DDR    DDRB
 #define PBI_PORT   PORTB
 #define PBI_PIN    PINB
 #define PBI_MASK   _BV(PB1)
-#endif
 #ifdef PBI_BIN
 #define PBI_INTSETUP() 	MCUCR |= _BV(ISC01)
 #define PBI_INTON()  GIMSK|=_BV(INT0)
@@ -123,7 +125,6 @@
  *@@ register-bound variables
  * 
  */
-
 // Counter limits
 //
 // pwm_cnt_top = top value for pseudo-timers.  
@@ -142,13 +143,13 @@
 //	to prevent running LEDs at full-brightness
 //
 #define PWM_TOP		0xFF
-#define PWM_OC_MAX	0x80
+#define PWM_OC_MAX	0xFF
 #if (PWM_OC_MAX>PWM_TOP)
 #error Invalid PWM_OC_MAX
 #endif
 
-register uint8_t pwm_cnt_top asm("r2"); 
-register uint8_t pwm_oc_max asm("r3");
+/*register*/ uint8_t pwm_cnt_top /*asm("r2")*/; 
+/*register*/ uint8_t pwm_oc_max /*asm("r3")*/;
 
 /* 
  *@@ RAM variables 
@@ -186,9 +187,9 @@ typedef struct _pwm_ctr_s
 	uint8_t pin_mask; // bitmask in PWM_PORT for this channel
 
 	// colour cycle mode
-	uint8_t mut_interval; // change only every I overflows
-	uint8_t mut_delta;    // number of steps to change each interval
-	uint8_t mut_ctr;	     // number of overflows since last change
+	uint8_t mut_interval; // change only every N overflows (0=do not change)
+	int8_t mut_delta;     // value to add to OC after each change interval
+	uint8_t mut_ctr;      // number of overflows since last change
 } pwm_ch_t;
 
 #define CH_RED 0
@@ -225,40 +226,13 @@ uint8_t debounce_ctr;
 #define HANG 	cli(); for(;;) _delay_ms(100);
 
 /*@***************************** subroutines ********************************/
+/*@@---------------------- initialization routines -------------------------*/
 /* 
- *@@ hello_world
- * 
- * Control a simple on-off led used as a debugging aid.
- *
- * Not present in deployed version
- */
-#ifdef HWL_PIN
-#define HWL_ON() HWL_PORT|=HWL_MASK
-#define HWL_OFF() HWL_PORT&=~HWL_MASK
-#define HWL_FLIP() HWL_PIN|=HWL_MASK
-inline void hwl_init() 
-{
-	HWL_DDR|=HWL_MASK;
-	HWL_ON();
-}
-#else
-#define HWL_ON() 
-#define HWL_OFF() 
-#define HWL_FLIP()
-#define hwl_init()
-#endif
-
-/* 
- *@@ ioinit - set up input/output pin configurations
+ *@@@ ioinit - set up input/output pin configurations
  */
 void
 ioinit (void)			/* Note [6] */
 {
-	/* 
-	 * Hello, World
-	 */
-	hwl_init();
-	
 	/* 
 	 * Configure the push-buttons pin as input with internal pullup
 	 *
@@ -305,13 +279,37 @@ ioinit (void)			/* Note [6] */
 	/* Enable timer 0 overflow interrupt. */
 	TIMSK0 = _BV(TOIE0);
 	/* Start timer 0. */
-	//TCCR0B = _BV(CS00); // divisor==1
-	TCCR0B = _BV(CS01); // divisor==8
+	TCCR0B = _BV(CS00); // divisor==1
+	//TCCR0B = _BV(CS01); // divisor==8
+	//TCCR0B = _BV(CS01)|_BV(CS00); // divisor==256
 	
 }
 
 /* 
- *@@ pwminit - set up software pwm counters
+ *@@@ hwl_init - hello_world pin setup
+ * 
+ * Control a simple on-off led used as a debugging aid.
+ *
+ * Not present in deployed version
+ */
+#ifdef HWL_PIN
+#define HWL_ON() HWL_PORT|=HWL_MASK
+#define HWL_OFF() HWL_PORT&=~HWL_MASK
+#define HWL_FLIP() HWL_PIN|=HWL_MASK
+inline void hwl_init() 
+{
+	HWL_DDR|=HWL_MASK;
+	HWL_ON();
+}
+#else
+#define HWL_ON() 
+#define HWL_OFF() 
+#define HWL_FLIP()
+#define hwl_init()
+#endif
+
+/* 
+ *@@@ pwminit - set up software pwm counters
  * 
  */
 void pwminit(void) 
@@ -339,38 +337,76 @@ void pwminit(void)
 	 * colour
 	 *
 	 */
-	SPWM[CH_RED].pwm_cnt = 0x00;
-	SPWM[CH_RED].pwm_oc = 0x00;
-	SPWM[CH_RED].pin_mask = _BV(PB2);
-	SPWM[CH_RED].mut_delta = 1;
-	SPWM[CH_RED].mut_interval = 1;
-	PWM_DDR |= SPWM[CH_RED].pin_mask;
-	PWM_PORT |= SPWM[CH_RED].pin_mask; // LED off (sink mode)
-	
-	SPWM[CH_GRN].pwm_cnt = 0x55;
-	SPWM[CH_GRN].pwm_oc = 0x00;
-	SPWM[CH_GRN].pin_mask = _BV(PB4);
-	SPWM[CH_GRN].mut_delta = 1;
-	SPWM[CH_GRN].mut_interval = 2;
-	PWM_DDR |= SPWM[CH_GRN].pin_mask;
-	PWM_PORT |= SPWM[CH_GRN].pin_mask; // LED off (sink mode)
-
-	SPWM[CH_BLU].pwm_cnt = 0xAA;
-	SPWM[CH_BLU].pwm_oc = 0x00;
-	SPWM[CH_BLU].pin_mask = _BV(PB3);
-	SPWM[CH_BLU].mut_delta = -1;
-	SPWM[CH_BLU].mut_interval = 1;
-	PWM_DDR |= SPWM[CH_BLU].pin_mask;
-	PWM_PORT |= SPWM[CH_BLU].pin_mask; // LED off (sink mode)
-
-
+	pwm_setup(CH_RED, PB2, 0x00, 0x20, 2, -1);
+	pwm_setup(CH_GRN, PB4, 0x55, 0x10, 3, 1);
+	pwm_setup(CH_BLU, PB3, 0xAA, 0x30, 1, -1);
 }
 
+/*@@---------------------- application subroutines -------------------------*/
+/* 
+ *@@@ pwm_setup - initialize pwm table entry
+ * 
+ */
+void pwm_setup(uint8_t ch_id, uint8_t pin, uint8_t cnt, uint8_t oc, uint8_t mut_interval, int8_t mut_delta)
+{
+	pwm_ch_t *pc = &(SPWM[ch_id]);
+	
+	pc->pwm_cnt = cnt;
+	pc->pwm_oc = oc;
+	pc->pin_mask = _BV(pin);
+	
+	pc->mut_interval = mut_interval;
+	pc->mut_delta = mut_delta;
+	pc->mut_ctr = 0;
+	
+	PWM_DDR |= pc->pin_mask;   // configure pin as output
+	PWM_PORT |= pc->pin_mask;  // LED off (sink mode)
+}
 
 /* 
- *@@ colour_jump
+ *@@@ pwm_overflow - handle overflow of a software-pwm channel's counter
  * 
- * Do an abrupt colour change and change of cycle rate
+ */
+void pwm_overflow(uint8_t ch_id) 
+{
+	int16_t oc_new;
+	int8_t delta_new = 0;
+	pwm_ch_t *pc = &(SPWM[ch_id]);
+	
+	/* 
+	 * The counter for SPWM channel 'i' has overflowed.  Do 'colour drift' action
+	 *
+	 */
+	if (pc->mut_interval == 0)
+		return;
+	
+	pc->mut_ctr++;
+	if (pc->mut_ctr >= pc->mut_interval) 
+	{
+		// 
+		// time to bump the duty cycle for this channel by a
+		// small bit
+		//
+		pc->mut_ctr = 0;
+		oc_new = pc->pwm_oc;
+		oc_new += pc->mut_delta;
+
+		if (oc_new <= 0) {
+			oc_new = 1;
+			delta_new = 0 - pc->mut_delta;
+		}
+		else if (oc_new > pwm_oc_max) {
+			oc_new = pwm_oc_max;
+			delta_new = 0 - pc->mut_delta;
+		}
+		pc->pwm_oc = oc_new & 0xFF;
+		if (delta_new != 0)
+			pc->mut_delta = delta_new;
+	}
+}
+
+/* 
+ *@@@ colour_jump - make a discontinuous colour change, and alter rate of colour cycling
  */
  void colour_jump(void)
 {
@@ -390,7 +426,7 @@ void pwminit(void)
 	 * This routine is also called at power-down.
 	 **/
 	for (i=0; i<CH_MAX; i++) {
-		pc = &SPWM[i];
+		pc = &(SPWM[i]);
 
 		PWM_PORT |= pc->pin_mask;   // Pin high => LEDs off (sink mode)
 		pc->pwm_oc = 0;
@@ -410,47 +446,64 @@ void pwminit(void)
 	}
 }
 
+/*@********************** Interrupt Service routines ************************/
 /* 
- *@@ pwm_overflow
- * 
+ *@@ Hardware timer overflow event 
  */
-void pwm_overflow(pwm_ch_t *pc) 
+ISR(TIM0_OVF_vect)	
 {
-	int16_t oc_new;
-	
+	uint8_t i;
+	uint8_t debounce_check = 0;
+	pwm_ch_t *pc;
+
 	/* 
-	 * The counter for SPWM channel 'i' has overflowed.  Do 'colour drift' action
+	 * We got a timer overflow interrupt.  Time to bump our software-PWM
+	 * counters, and test the output compares.
 	 *
+	 * We simulate inverting fast PWM mode (common-anode LEDs, in sink mode).  
+	 *
+	 * OC pin is cleared at BOTTOM (led ON) and set  at OC match (LED off).  
+	 *
+	 * So PWM value 0 is "always off", PWM value 255 is (almost) always on.
 	 */
 
-	pc->mut_ctr++;
-	if (pc->mut_ctr > pc->mut_interval) {
-		// 
-		// time to bump the duty cycle for this channel by a
-		// small bit
-		//
-		pc->mut_ctr = 0;
-		oc_new = pc->pwm_oc + pc->mut_delta;
-		if (oc_new <= 0) {
-			oc_new = 1;
-			pc->mut_delta = -(pc->mut_delta);
+	for (i=0; i<CH_MAX; i++) 
+	{
+		pc = &(SPWM[i]);
+		
+		//PWM_PIN |= pc->pin_mask;
+
+		++pc->pwm_cnt;
+		if (pc->pwm_cnt > pwm_cnt_top) pc->pwm_cnt = 0;
+		if (pc->pwm_cnt == pc->pwm_oc) {
+			PWM_PORT |= pc->pin_mask;	// set output pin (LED off) when ctr==OC
 		}
-		else if (oc_new > pwm_oc_max) {
-			oc_new = pwm_oc_max;
-			pc->mut_delta = -(pc->mut_delta);
+		else if (pc->pwm_cnt == 0) {
+			PWM_PORT &= ~(pc->pin_mask); // clear output pin (LED on) when ctr==BOTTOM
+			pwm_overflow(i);
+			if (i==0) debounce_check = 1;  // use CH0 overflow
+						       // to clock debounce timer
 		}
-		pc->pwm_oc = oc_new;
+	}
+
+	/* 
+	 * Check if it's time to reenable pushbutton interrupts
+	 *
+	 * We disable interrupts for a while after each button press, for debouncing
+	 */
+	if (debounce_check && debounce_ctr && (--debounce_ctr == 0))
+	{
+		// re-enable interrupts
+		PWR_INTON();
+		PBI_INTON();
 	}
 }
 
-
- /*@********************** Interrupt Service routines ************************/
-
- /* 
- *@@ PCINT0 - Power button (actually general pin change interrupt)
+/* 
+ *@@ PCINT0 - Power button (via general-purpose pin change) interrupt
  * 
- * The only pin we ever enable for PCINT0 is the power button
- *
+ * The only pin we ever enable for PCINT0 is the power button, so we don't need to 
+ * check /which/ pin triggered the interrupt.
  */
 #ifdef PWR_PIN
 ISR(PCINT0_vect) 
@@ -517,13 +570,15 @@ ISR(PCINT0_vect)
 #ifdef PBI_PIN
 ISR(INT0_vect)
 {
+	char i;
+	
 	/* 
 	 * We got a negative-edge on the INT0 pin, i.e. colour button press
 	 *
 	 * Do a "colour change" procedure
 	 */	
 	colour_jump();
-	_delay_ms(500);
+	for (i=0;i<5;i++) _delay_ms(100);
 
 	/*
 	 * Disable further INT0 events for DEBOUNCE_INTERVAL soft-PWM cycles.
@@ -535,74 +590,19 @@ ISR(INT0_vect)
 }
 #endif
 
-/* 
- *@@ Hardware timer overflow event 
- */
-ISR(TIM0_OVF_vect)	
-{
-	uint8_t i;
-	uint8_t debounce_check = 0;
-	pwm_ch_t *pc;
 
-	/* 
-	 * We got a timer overflow interrupt.  Time to bump our software-PWM
-	 * counters, and test the output compares.
-	 *
-	 * We simulate inverting fast PWM mode (common-anode LEDs, in sink mode).  
-	 *
-	 * OC pin is cleared at BOTTOM (led ON) and set  at OC match (LED off).  
-	 *
-	 * So PWM value 0 is "always off", PWM value 255 is (almost) always on.
-	 */
-
-	for (i=0; i<CH_MAX; i++) 
-	{
-		pc = &SPWM[i];
-		
-		PWM_PIN |= pc->pin_mask;
-
-		++pc->pwm_cnt;
-		if (pc->pwm_cnt > pwm_cnt_top) pc->pwm_cnt = 0;
-		if (pc->pwm_cnt == pc->pwm_oc) {
-			PWM_PORT |= pc->pin_mask;	// set output pin (LED off) when ctr==OC
-		}
-		else if (pc->pwm_cnt == 0) {
-			PWM_PORT &= ~(pc->pin_mask); // clear output pin (LED on) when ctr==BOTTOM
-#if 0
-			pwm_overflow(pc);
-			if (i==0) debounce_check = 1;  // use CH0 overflow
-						       // to clock debounce timer
-#endif
-		}
-	}
-
-
-#if 0
-	/* 
-	 * Check if it's time to reenable pushbutton interrupts
-	 *
-	 * We disable interrupts for a while after each button press, for debouncing
-	 */
-	if (debounce_check && debounce_ctr && (--debounce_ctr == 0))
-	{
-		// re-enable interrupts
-		PWR_INTON();
-		PBI_INTON();
-	}
-#endif
-}
-
+/*@********************************* main ***********************************/
 int
 main (void)
 {
+	/* 
+	 * Hello, World
+	 */
+	hwl_init();
+
+	/* set up application IO resources */
 	ioinit ();
 	pwminit();
-
-	SPWM[CH_RED].pwm_oc = 0x10;
-	SPWM[CH_GRN].pwm_oc = 0x40;
-	SPWM[CH_BLU].pwm_oc = 0xF0;
-	
-	//HANG;
 
 	// Enable interrupts, go!
 	sei();

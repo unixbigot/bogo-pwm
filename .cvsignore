@@ -1,10 +1,13 @@
 .cvsignore
+.dep
 lut.bin
 lut.elf
 lut.hex
+lut.lss
 lut.lst
 lut.map
 lut.srec
+lut.sym
 lut_eeprom.bin
 lut_eeprom.hex
 lut_eeprom.srec

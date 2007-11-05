@@ -2,8 +2,8 @@
 /*
  * $RCSfile: lut.c,v $
  * $Author: chris $
- * $Date: 2007-10-17 10:29:34 $
- * $Revision: 1.4 $
+ * $Date: 2007-11-05 11:36:16 $
+ * $Revision: 1.5 $
  *
  */ 
 //@********************************* lut.c ***********************************
@@ -71,8 +71,12 @@
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <avr/sleep.h>
+#include <util/delay.h>
 
-#define F_CPU 8000000UL
+#ifndef F_CPU
+#error define F_CPU in makefile
+#endif
+
 #include <util/delay.h>
 
 /*@**************************** forward decls *******************************/
@@ -462,12 +466,13 @@ void pwm_overflow(uint8_t ch_id)
  */
 void colour_jump(void)
 {
-	uint8_t tc, i;
+	uint8_t rand, tc, i;
 	pwm_ch_t *pc;
 
 	// Use (TCNT0 mod 3) as a random value to determine which LED to mogrify
 	// Don't actually care about real division, so use bogo-mod
-	tc = TCNT0&0x03; 
+	rand = 0; //TCNT0;
+	tc = rand&0x03; 
 	if (tc>=CH_MAX) tc=0;
 	
 	/*
@@ -480,7 +485,7 @@ void colour_jump(void)
 	for (i=0; i<CH_MAX; i++) {
 		pc = &(SPWM[i]);
 
-		pc->pwm_oc = 0;	            // Set 0% duty cycle (dark)
+		pc->pwm_oc = 1;	            // Set almost 0% duty cycle (dark)
 		PWM_PORT |= pc->pin_mask;   // LED off immediately (pin high, sink mode)
 
 		if (i!=tc) 
@@ -500,7 +505,7 @@ void colour_jump(void)
 			pc->mut_delta = 1;
 		}
 		else {
-			if (TCNT0 & 0x80) 
+			if (rand & 0x80) 
 				pc->mut_delta /= 2;
 			else
 				pc->mut_delta *= 2;
@@ -584,6 +589,34 @@ ISR(TIM0_OVF_vect)
 }
 
 /* 
+ *@@ INT0 - Change Button press event
+ */
+#ifdef PBI_PIN
+ISR(INT0_vect)
+{
+	/* 
+	 * We got a negative-edge on the INT0 pin, i.e. colour button press
+	 *
+	 * Do a "colour change" procedure
+	 */	
+	cli();
+	colour_jump();
+	for (char j=50;j;j--)
+		_delay_ms(10);
+	sei();
+
+	/*
+	 * Disable further INT0 events for DEBOUNCE_INTERVAL soft-PWM cycles.
+	 * (About 1ms with default values)
+	 *
+	 * This is done to aid debouncing of the pushbutton input.
+	 */
+	PBI_INTOFF();
+	debounce_ctr = DEBOUNCE_INTERVAL;
+}
+#endif
+
+/* 
  *@@ PCINT0 - Power button (via general-purpose pin change) interrupt
  * 
  * The only pin we ever enable for pin-change interrupt is the power button, 
@@ -626,8 +659,9 @@ ISR(PCINT0_vect)
 		 */
 		colour_jump(); // ALL LEDs off
 		pwr_state = 0;
-		set_sleep_mode(SLEEP_MODE_PWR_DOWN);
-		sleep_mode();
+		//set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+		//set_sleep_mode(SLEEP_MODE_ADC);
+		// let the main loop put us to bed
 
 		/* 
 		 * When we wake up due to another button press, we will get another PCINT interrupt, 
@@ -653,29 +687,6 @@ ISR(PCINT0_vect)
 }
 #endif
 
-/* 
- *@@ Button-press event
- */
-#ifdef PBI_PIN
-ISR(INT0_vect)
-{
-	/* 
-	 * We got a negative-edge on the INT0 pin, i.e. colour button press
-	 *
-	 * Do a "colour change" procedure
-	 */	
-	colour_jump();
-
-	/*
-	 * Disable further INT0 events for DEBOUNCE_INTERVAL soft-PWM cycles.
-	 * (About 1ms with default values)
-	 *
-	 * This is done to aid debouncing of the pushbutton input.
-	 */
-	PBI_INTOFF();
-	debounce_ctr = DEBOUNCE_INTERVAL;
-}
-#endif
 
 
 /*@********************************* main ***********************************/
@@ -697,6 +708,8 @@ main (void)
 	/* loop forever, the interrupts are doing the rest */
 	for (;;) 
 	{
+		if (pwr_state == 0) 
+			set_sleep_mode(SLEEP_MODE_PWR_DOWN);
 		// sleep until next timer tick (every 256 cycles, so more of a blink, really!)
 		sleep_mode(); 
 
